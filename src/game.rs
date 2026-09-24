@@ -108,24 +108,31 @@ impl Game {
     }
 
     /// Leave the dream: start the day's clock and arrive in the bedroom.
+    ///
+    /// Nothing carried in the dream comes with you.
     fn wake(&mut self, elapsed: Duration) -> String {
         self.awake = true;
         self.woke_at = elapsed;
+        self.inventory.clear();
         self.enter(world::WAKE, elapsed)
     }
 
-    /// Move to `id`, mark it visited, describe it, and run its arrival action.
+    /// Move to `id` and describe it on the first visit.
+    ///
+    /// Revisits get a single line to save screen space, carrying the
+    /// same countdown as the inventory once awake; `look` still gives
+    /// the full description.
     fn enter(&mut self, id: &'static str, elapsed: Duration) -> String {
         self.here = id;
-        let first = self.visited.insert(id);
-        let mut out = self.describe(elapsed, first);
-        if let Some(action) = world::room(id).and_then(|r| r.on_enter.as_ref())
-            && self.allows(action)
-        {
-            out.push_str("\n\n");
-            out.push_str(&self.perform(action, elapsed));
+        if self.visited.insert(id) {
+            return self.describe(elapsed, true);
         }
-        out
+        let title = world::room(id).map_or("somewhere", |r| r.title);
+        let back = format!("You're back at {}", mid_sentence(title));
+        if !self.awake {
+            return format!("{back}.");
+        }
+        format!("{back}, {}.", clock::countdown(elapsed, self.woke_at))
     }
 
     /// The current room's title, description, items, and exits.
@@ -250,9 +257,11 @@ impl Game {
             match effect {
                 Effect::Gain(id) => self.gain(id),
                 Effect::GainIdea(route) => {
+                    // Only announce the idea when this is the route that grants it
                     if self.idea_route.is_none() {
                         self.idea_route = Some(*route);
                         self.gain(world::IDEA);
+                        out = format!("{out} {}", world::IDEA_FOUND);
                     }
                 }
                 Effect::Teleport(to) => {
@@ -318,14 +327,19 @@ impl Game {
         }
     }
 
-    /// Held items, then the countdown as the last thing you "have".
+    /// Held items, then the time left as the last thing you "have".
     ///
-    /// With nothing held, it collapses into one sentence.
+    /// In the dream that's all the time in the world; awake, it's the
+    /// countdown. With nothing held, it collapses into one sentence.
     fn inventory_text(&self, elapsed: Duration) -> String {
-        if !self.awake {
+        if !self.awake && self.inventory.is_empty() {
             return "You have nothing but all the time in the world.".to_string();
         }
-        let countdown = clock::countdown(elapsed, self.woke_at);
+        let countdown = if self.awake {
+            clock::countdown(elapsed, self.woke_at)
+        } else {
+            "and all the time in the world".to_string()
+        };
         let names: Vec<&str> = self
             .inventory
             .iter()
@@ -358,20 +372,24 @@ impl Game {
                 notice the room is leaning in."
             }
             Some(Route::Overheard) => {
-                "You start with where you heard it: two strangers in a market aisle. \
-                A few people nod like they've stood in that aisle too."
+                "You start with where you heard it: two strangers arguing at Mean \
+                Cup. A few people nod like they've sat at that table too."
             }
             Some(Route::WarStory) => {
                 "You start with the part that went wrong. The room relaxes. \
                 Everyone has one of those."
             }
-            Some(Route::Perspective) => {
-                "You start with the view from the monument steps. Most of the room \
-                has stood up there, and never thought of it that way."
+            Some(Route::ExplainedIt) => {
+                "You explain it the way you explained it to the duck. Unlike the \
+                duck, the room laughs in the right places."
             }
             Some(Route::StoppedLooking) => {
-                "You admit you found it by giving up on finding it. Someone in the \
-                back laughs, then nods."
+                "You admit you found it on a bench by the creek, once you stopped \
+                looking. Someone in the back laughs, then nods."
+            }
+            Some(Route::SlowedDown) => {
+                "You start with a farmer and a fence post. It sounds like it's going \
+                nowhere, right up until it isn't."
             }
         };
         format!(
@@ -385,6 +403,23 @@ impl Game {
             world::PUNCHLINE,
             world::EVENT_DETAILS
         )
+    }
+}
+
+/// A room title that reads naturally after "at": "The Kitchen" becomes
+/// "the kitchen", "A Field" becomes "the field", and names like "Mean Cup"
+/// stay as they are.
+fn mid_sentence(title: &str) -> String {
+    let has_article = ["A ", "The ", "Your "]
+        .iter()
+        .any(|article| title.starts_with(article));
+    if !has_article {
+        return title.to_string();
+    }
+    let lowered = title.to_lowercase();
+    match lowered.strip_prefix("a ") {
+        Some(rest) => format!("the {rest}"),
+        None => lowered,
     }
 }
 
@@ -430,16 +465,16 @@ mod tests {
     fn awake() -> Game {
         let mut g = Game::new();
         g.start(secs(0));
-        walk(&mut g, &["read letter"]);
+        walk(&mut g, &["open mailbox", "read letter"]);
         assert_eq!(g.here, world::WAKE);
         g
     }
 
-    /// A game standing on the stoop, reached by walking at time zero.
-    fn on_stoop() -> Game {
+    /// A game standing on the square, reached by walking at time zero.
+    fn on_square() -> Game {
         let mut g = awake();
         walk(&mut g, &["out", "out"]);
-        assert_eq!(g.here, "stoop");
+        assert_eq!(g.here, "square");
         g
     }
 
@@ -450,7 +485,6 @@ mod tests {
         let mut g = Game::new();
         let out = g.start(secs(0));
         assert!(out.starts_with("A Field"));
-        assert!(said(&out, "not wearing shoes"));
         assert!(said(&out, "small mailbox"));
     }
 
@@ -490,7 +524,7 @@ mod tests {
         let out = cont(g.step("open window", secs(1)));
         assert_eq!(g.here, "dream_field");
         assert!(said(&out, "climb through"));
-        assert!(said(&out, "A Field"));
+        assert!(said(&out, "You're back at the field."));
     }
 
     #[test]
@@ -513,31 +547,123 @@ mod tests {
     }
 
     #[test]
-    fn every_letter_phrasing_wakes() {
-        for input in [
-            "read letter",
-            "open the letter",
+    fn every_way_of_getting_the_letter_then_reading_it_wakes() {
+        for get in [
+            "open mailbox",
+            "check the mailbox",
             "take letter",
-            "get letter",
-            "read mailbox",
+            "get the letter",
         ] {
-            let mut g = Game::new();
-            g.start(secs(0));
-            let out = cont(g.step(input, secs(5)));
-            assert!(g.awake, "{input:?}");
-            assert_eq!(g.here, world::WAKE, "{input:?}");
-            assert!(said(&out, "Beep!"), "{input:?}");
-            assert!(said(&out, "Now you have a day."), "{input:?}");
+            for read in ["read letter", "open the letter"] {
+                let mut g = Game::new();
+                g.start(secs(0));
+                walk(&mut g, &[get]);
+                assert!(g.inventory.contains(&world::LETTER), "{get:?}");
+                let out = cont(g.step(read, secs(5)));
+                assert!(g.awake, "{get:?} then {read:?}");
+                assert_eq!(g.here, world::WAKE);
+                assert!(said(&out, "Beep!"));
+                assert!(said(&out, "all the time in the world"));
+            }
         }
     }
 
     #[test]
-    fn opening_mailbox_does_not_wake() {
+    fn opening_mailbox_takes_the_letter_without_waking() {
         let mut g = Game::new();
         g.start(secs(0));
         let out = cont(g.step("open mailbox", secs(1)));
         assert!(said(&out, "reveals a letter"));
+        assert!(g.inventory.contains(&world::LETTER));
         assert!(!g.awake);
+    }
+
+    #[test]
+    fn letter_can_be_read_in_any_dream_room_once_held() {
+        for path in [&["n"][..], &["s"], &["n", "e"]] {
+            let mut g = Game::new();
+            g.start(secs(0));
+            walk(&mut g, &["take letter"]);
+            walk(&mut g, path);
+            assert_ne!(g.here, "dream_field", "{path:?}");
+            walk(&mut g, &["read letter"]);
+            assert!(g.awake, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn letter_must_be_taken_before_reading() {
+        let mut g = Game::new();
+        g.start(secs(0));
+        let out = cont(g.step("read letter", secs(1)));
+        assert!(said(&out, "still in the mailbox"));
+        assert!(!g.awake);
+    }
+
+    #[test]
+    fn dream_inventory_lists_the_letter() {
+        let mut g = Game::new();
+        g.start(secs(0));
+        walk(&mut g, &["take letter"]);
+        let out = cont(g.step("i", secs(1)));
+        assert_eq!(
+            out,
+            "You have:\n  a letter\n  and all the time in the world"
+        );
+    }
+
+    #[test]
+    fn the_letter_stays_in_the_dream() {
+        let g = awake();
+        assert!(g.inventory.is_empty());
+    }
+
+    #[test]
+    fn revisits_are_one_line_but_look_is_full() {
+        let mut g = on_square();
+        walk(&mut g, &["w"]);
+        let back = cont(g.step("e", secs(0)));
+        assert!(said(
+            &back,
+            "You're back at the square, and only 13 hours until TechLancaster."
+        ));
+        let look = cont(g.step("look", secs(0)));
+        assert!(said(&look, "Red brick buildings"));
+
+        walk(&mut g, &["in"]);
+        let back = cont(g.step("back", secs(0)));
+        assert!(said(
+            &back,
+            "You're back at your bedroom, and only 13 hours until TechLancaster."
+        ));
+    }
+
+    #[test]
+    fn revisit_line_counts_down_like_the_inventory() {
+        let mut g = on_square();
+        walk(&mut g, &["w"]);
+        // Revisits happen before the funnel, so the countdown is in hours
+        let later = cont(g.step("e", secs(230)));
+        assert!(said(&later, "and only 3 hours until TechLancaster."));
+        let inventory = cont(g.step("i", secs(230)));
+        assert!(said(&inventory, "and only 3 hours until TechLancaster"));
+    }
+
+    #[test]
+    fn dream_revisits_have_no_countdown() {
+        let mut g = Game::new();
+        g.start(secs(0));
+        walk(&mut g, &["n"]);
+        assert_eq!(cont(g.step("w", secs(1))), "You're back at the field.");
+    }
+
+    #[test]
+    fn titles_read_naturally_mid_sentence() {
+        assert_eq!(mid_sentence("A Field"), "the field");
+        assert_eq!(mid_sentence("The Square"), "the square");
+        assert_eq!(mid_sentence("Your Bedroom"), "your bedroom");
+        assert_eq!(mid_sentence("Mean Cup"), "Mean Cup");
+        assert_eq!(mid_sentence("Amish Country"), "Amish Country");
     }
 
     #[test]
@@ -576,19 +702,19 @@ mod tests {
 
     #[test]
     fn phase_text_follows_the_clock() {
-        let mut g = on_stoop();
+        let mut g = on_square();
         let morning = cont(g.step("look", secs(0)));
         let midday = cont(g.step("look", secs(120)));
         let afternoon = cont(g.step("look", secs(200)));
         let evening = cont(g.step("look", secs(250)));
 
-        assert!(said(&morning, "Delivery trucks"));
-        assert!(said(&midday, "hunting lunch") && !said(&midday, "Delivery trucks"));
-        assert!(said(&afternoon, "long and gold") && !said(&afternoon, "hunting lunch"));
+        assert!(said(&morning, "sweeping"));
+        assert!(said(&midday, "lunch crowd") && !said(&midday, "sweeping"));
+        assert!(said(&afternoon, "long and gold") && !said(&afternoon, "lunch crowd"));
         assert!(said(&evening, "Streetlights"));
         // The base description is always there
         for out in [morning, midday, afternoon, evening] {
-            assert!(said(&out, "King, Queen, Prince, Duke"));
+            assert!(said(&out, "Red brick buildings"));
         }
     }
 
@@ -601,122 +727,117 @@ mod tests {
     }
 
     #[test]
-    fn stoop_reaches_every_spoke_and_back() {
+    fn square_reaches_every_spoke_and_back() {
         for (dir, room, back) in [
-            ("n", "market", "s"),
-            ("e", "mean_cup", "w"),
-            ("s", "office", "n"),
-            ("w", "square", "e"),
+            ("w", "mean_cup", "e"),
+            ("n", "office", "s"),
+            ("s", "county_park", "n"),
+            ("e", "amish_country", "w"),
         ] {
-            let mut g = on_stoop();
+            let mut g = on_square();
             walk(&mut g, &[dir]);
             assert_eq!(g.here, room);
             walk(&mut g, &[back]);
-            assert_eq!(g.here, "stoop", "back from {room}");
+            assert_eq!(g.here, "square", "back from {room}");
+        }
+    }
+
+    #[test]
+    fn square_description_points_at_every_spoke() {
+        let mut g = on_square();
+        let out = cont(g.step("look", secs(0)));
+        for place in ["Mean Cup", "work", "County Park", "Amish Country"] {
+            assert!(said(&out, place), "{place}");
         }
     }
 
     #[test]
     fn nicknames_work_but_are_not_listed() {
-        let mut g = on_stoop();
+        let mut g = on_square();
         let out = cont(g.step("look", secs(0)));
-        assert!(out.ends_with("Exits: north, east, south, west, in"));
-        walk(&mut g, &["go to the market"]);
-        assert_eq!(g.here, "market");
-    }
-
-    #[test]
-    fn garage_is_up_from_office_down() {
-        let mut g = on_stoop();
-        walk(&mut g, &["s", "down"]);
-        assert_eq!(g.here, "garage");
-        walk(&mut g, &["up"]);
+        assert!(out.ends_with("Exits: west, north, south, east, in"));
+        walk(&mut g, &["go to work"]);
         assert_eq!(g.here, "office");
     }
 
     #[test]
+    fn getting_coffee_at_the_square_heads_to_mean_cup() {
+        let mut g = on_square();
+        walk(&mut g, &["get coffee"]);
+        assert_eq!(g.here, "mean_cup");
+    }
+
+    #[test]
     fn invalid_exit_in_the_city_stays_put() {
-        let mut g = on_stoop();
+        let mut g = on_square();
         let out = cont(g.step("up", ms(239_999)));
         assert!(said(&out, "can't go that way"));
-        assert_eq!(g.here, "stoop");
+        assert_eq!(g.here, "square");
     }
 
     // ── Idea routes and effects ──────────────────────────────────────
 
     #[test]
-    fn market_listen_gives_the_idea() {
-        let mut g = on_stoop();
-        walk(&mut g, &["n", "listen"]);
-        assert_eq!(g.idea_route, Some(Route::Overheard));
-        assert!(g.inventory.contains(&world::IDEA));
+    fn every_spoke_has_a_route_to_the_idea() {
+        for (path, route) in [
+            (&["w", "eavesdrop"][..], Route::Overheard),
+            (&["w", "listen to the strangers"], Route::Overheard),
+            (&["n", "describe blocker"], Route::WarStory),
+            (&["n", "talk to the duck"], Route::ExplainedIt),
+            (&["s", "sit on the bench"], Route::StoppedLooking),
+            (&["s", "walk the trail"], Route::StoppedLooking),
+            (&["e", "help the farmer"], Route::SlowedDown),
+            (&["e", "help"], Route::SlowedDown),
+        ] {
+            let mut g = on_square();
+            walk(&mut g, &path[..path.len() - 1]);
+            let out = cont(g.step(path[path.len() - 1], secs(0)));
+            assert_eq!(g.idea_route, Some(route), "{path:?}");
+            assert!(g.inventory.contains(&world::IDEA), "{path:?}");
+            assert!(said(&out, world::IDEA_FOUND), "{path:?}");
+        }
     }
 
     #[test]
-    fn market_buy_only_ever_sells_whoopie_pie() {
-        let mut g = on_stoop();
-        walk(&mut g, &["n", "buy donuts"]);
-        assert_eq!(g.inventory, vec!["whoopie_pie"]);
-        assert_eq!(g.idea_route, None);
-    }
-
-    #[test]
-    fn describing_a_blocker_gives_a_war_story() {
-        let mut g = on_stoop();
-        walk(&mut g, &["s", "describe blocker"]);
-        assert!(g.inventory.contains(&"war_story"));
-        assert_eq!(g.idea_route, Some(Route::WarStory));
-    }
-
-    #[test]
-    fn monument_look_gives_perspective() {
-        let mut g = on_stoop();
-        walk(&mut g, &["w", "up"]);
-        let out = cont(g.step("look", secs(0)));
-        assert!(said(&out, "Not high, exactly"));
-        assert!(said(&out, "moment of perspective"));
-        assert_eq!(g.idea_route, Some(Route::Perspective));
-    }
-
-    #[test]
-    fn park_gives_the_idea_only_to_those_without_it() {
-        let mut g = on_stoop();
-        let out = {
-            walk(&mut g, &["w"]);
-            cont(g.step("n", secs(0)))
-        };
-        assert!(said(&out, "the way a cat does"));
-        assert_eq!(g.idea_route, Some(Route::StoppedLooking));
-
-        let mut g = on_stoop();
-        walk(&mut g, &["n", "listen", "s", "w"]);
-        let out = cont(g.step("n", secs(0)));
-        assert!(!said(&out, "the way a cat does"));
-        assert_eq!(g.idea_route, Some(Route::Overheard));
+    fn idea_is_only_announced_when_granted() {
+        let mut g = on_square();
+        walk(&mut g, &["w", "eavesdrop", "e", "n"]);
+        let out = cont(g.step("describe blocker", secs(0)));
+        assert!(said(&out, "war story"));
+        assert!(!said(&out, world::IDEA_FOUND));
     }
 
     #[test]
     fn first_idea_route_wins() {
-        let mut g = on_stoop();
-        walk(&mut g, &["n", "listen", "s", "s", "describe blocker"]);
+        let mut g = on_square();
+        walk(&mut g, &["w", "eavesdrop", "e", "n", "describe blocker"]);
         assert_eq!(g.idea_route, Some(Route::Overheard));
         let ideas = g.inventory.iter().filter(|id| **id == world::IDEA).count();
         assert_eq!(ideas, 1);
     }
 
     #[test]
-    fn garage_ticket_works_with_read_or_take() {
-        for input in ["read ticket", "take ticket"] {
-            let mut g = on_stoop();
-            walk(&mut g, &["s", "down", input]);
-            assert!(g.inventory.contains(&"indignation"), "{input:?}");
+    fn saying_no_blockers_gains_nothing() {
+        let mut g = on_square();
+        walk(&mut g, &["n", "say no blockers"]);
+        assert!(g.inventory.is_empty());
+        assert_eq!(g.idea_route, None);
+    }
+
+    #[test]
+    fn amish_stand_sells_pie_without_the_idea() {
+        for input in ["buy pie", "take pie", "buy whoopie pie"] {
+            let mut g = on_square();
+            walk(&mut g, &["e", input]);
+            assert_eq!(g.inventory, vec!["whoopie_pie"], "{input:?}");
+            assert_eq!(g.idea_route, None, "{input:?}");
         }
     }
 
     #[test]
     fn the_idea_cannot_be_dropped() {
-        let mut g = on_stoop();
-        walk(&mut g, &["n", "listen"]);
+        let mut g = on_square();
+        walk(&mut g, &["w", "listen"]);
         let out = cont(g.step("drop idea", secs(0)));
         assert!(said(&out, "It follows you anyway."));
         assert!(g.inventory.contains(&world::IDEA));
@@ -726,7 +847,7 @@ mod tests {
 
     #[test]
     fn funnel_sends_any_movement_to_venue() {
-        let mut g = on_stoop();
+        let mut g = on_square();
         let out = cont(g.step("up", secs(240)));
         assert_eq!(g.here, world::VENUE);
         assert!(said(&out, "Buchanan Avenue"));
@@ -754,11 +875,11 @@ mod tests {
     #[test]
     fn ending_fires_first_for_any_input() {
         for input in ["look", "n", "", "xyzzy", "take coffee", "i", "give talk"] {
-            let mut g = on_stoop();
+            let mut g = on_square();
             let outcome = g.step(input, secs(285));
             assert!(matches!(outcome, Outcome::Ended(_)), "input {input:?}");
             // The command itself was not processed
-            assert_eq!(g.here, "stoop", "input {input:?}");
+            assert_eq!(g.here, "square", "input {input:?}");
         }
     }
 
@@ -800,14 +921,14 @@ mod tests {
 
     #[test]
     fn ending_is_keyed_by_route() {
-        let mut g = on_stoop();
+        let mut g = on_square();
         let Outcome::Ended(none) = g.step("look", secs(285)) else {
             panic!("expected ending");
         };
         assert!(said(&none, "You never found the idea."));
 
-        let mut g = on_stoop();
-        walk(&mut g, &["s", "describe blocker"]);
+        let mut g = on_square();
+        walk(&mut g, &["n", "describe blocker"]);
         let Outcome::Ended(scarred) = g.step("look", secs(285)) else {
             panic!("expected ending");
         };
@@ -818,7 +939,7 @@ mod tests {
     #[test]
     fn give_talk_at_venue_wins_without_being_called() {
         for input in ["give talk", "give a talk", "do the talk", "start talk"] {
-            let mut g = on_stoop();
+            let mut g = on_square();
             cont(g.step("n", secs(250)));
             let Outcome::Ended(out) = g.step(input, secs(260)) else {
                 panic!("expected ending for {input:?}");
@@ -834,7 +955,7 @@ mod tests {
 
     #[test]
     fn give_talk_elsewhere_does_not_end_the_game() {
-        let mut g = on_stoop();
+        let mut g = on_square();
         assert!(matches!(
             g.step("give talk", secs(10)),
             Outcome::Continue(_)
@@ -921,18 +1042,20 @@ mod tests {
             ("n", 5),
             ("n", 10),
             ("look", 25),
+            ("take letter", 28),
             ("read letter", 30),
             ("out", 40),
             ("take coffee", 60),
             ("out", 70),
-            ("s", 80),
+            ("n", 80),
             ("describe blocker", 90),
-            ("down", 100),
-            ("read ticket", 110),
-            ("out", 120),
+            ("out", 100),
+            ("e", 110),
+            ("help farmer", 120),
+            ("buy pie", 125),
             ("w", 130),
-            ("up", 140),
-            ("look", 150),
+            ("s", 140),
+            ("sit", 150),
             ("i", 200),
             ("n", 245),
             ("look", 260),

@@ -5,7 +5,7 @@
 //! current room (exit nicknames, room actions, easter eggs, catch-all).
 
 /// Words dropped anywhere in the input before matching.
-const FILLER: &[&str] = &["the", "a", "an", "please", "go", "to", "at"];
+const FILLER: &[&str] = &["the", "a", "an", "please", "go", "to", "at", "on"];
 
 /// Accepted direction words and the canonical direction each maps to.
 const DIRECTIONS: &[(&str, &str)] = &[

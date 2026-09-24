@@ -19,8 +19,6 @@ pub struct Room {
     pub items: &'static [&'static str],
     /// Room-specific commands, tried in order.
     pub actions: &'static [Action],
-    /// Tried on every arrival, after the description; `verbs` is ignored.
-    pub on_enter: Option<Action>,
 }
 
 /// A room-specific command and what it does.
@@ -57,8 +55,9 @@ pub enum Effect {
 pub enum Route {
     Overheard,
     WarStory,
-    Perspective,
+    ExplainedIt,
     StoppedLooking,
+    SlowedDown,
 }
 
 impl Action {
@@ -97,8 +96,14 @@ pub const WAKE: &str = "bedroom";
 /// Room the funnel delivers the player to.
 pub const VENUE: &str = "venue";
 
+/// Item id of the dream's letter; reading it wakes the player.
+pub const LETTER: &str = "letter";
+
 /// Item id of the idea, gained through `Effect::GainIdea`.
 pub const IDEA: &str = "idea";
+
+/// Appended to an action's response when it actually grants the idea.
+pub const IDEA_FOUND: &str = "There it is: the idea for your talk.";
 
 /// Appended to dream descriptions once the alarm starts bleeding through.
 pub const DREAM_BEEP: &str = "You hear a faint beeping sound.";
@@ -131,6 +136,11 @@ pub const EVENT_DETAILS: &str = "TechLancaster\n\
 
 pub static ITEMS: &[Item] = &[
     Item {
+        id: LETTER,
+        name: "a letter",
+        aliases: &["letter"],
+    },
+    Item {
         id: "coffee",
         name: "a lukewarm coffee",
         aliases: &["coffee", "lukewarm coffee", "cup", "mug"],
@@ -151,16 +161,6 @@ pub static ITEMS: &[Item] = &[
         aliases: &["war story", "story"],
     },
     Item {
-        id: "indignation",
-        name: "righteous indignation",
-        aliases: &["indignation", "righteous indignation"],
-    },
-    Item {
-        id: "perspective",
-        name: "a moment of perspective",
-        aliases: &["perspective", "moment", "moment of perspective"],
-    },
-    Item {
         id: IDEA,
         name: "the idea [REDACTED]",
         aliases: &["idea"],
@@ -177,7 +177,6 @@ const ROOM: Room = Room {
     exits: &[],
     items: &[],
     actions: &[],
-    on_enter: None,
 };
 
 /// Blank action for struct-update syntax.
@@ -190,29 +189,59 @@ const ACTION: Action = Action {
     effects: &[],
 };
 
-/// Reading the letter, however it's phrased, ends the dream.
+/// Reading the letter ends the dream, in any dream room, once it's held.
 const READ_LETTER: Action = Action {
-    verbs: &["read", "open", "take", "get"],
+    verbs: &["read", "open"],
     noun: "letter",
+    requires: &[LETTER],
     response: "The letter is short. It says:\n\n    Beep!\n    Beep!\n    Beep!",
     effects: &[Effect::Wake],
     ..ACTION
 };
 
-/// The market sells you a whoopie pie, whatever you came for.
-const MARKET_BUY: Action = Action {
-    verbs: &["buy"],
-    response: "You go in for cider donuts and come out with a whoopie pie. That's \
-        all the market is selling you today.",
-    effects: &[Effect::Gain("whoopie_pie")],
+/// Listening in at Mean Cup, with or without naming who.
+const EAVESDROP: Action = Action {
+    verbs: &["eavesdrop", "listen"],
+    response: "You don't mean to listen. You listen. You leave with a strong opinion \
+        about semicolons, and it isn't even yours.",
+    effects: &[Effect::Gain("opinion"), Effect::GainIdea(Route::Overheard)],
     ..ACTION
 };
 
-/// Listening to the busker, with or without naming them.
-const BUSKER: Action = Action {
-    verbs: &["listen"],
-    response: "You stand through a whole verse and put a dollar in the case. It's a \
-        good song. It doesn't need to be anything else.",
+/// Sitting down in County Park.
+const SIT: Action = Action {
+    verbs: &["sit", "rest", "relax"],
+    response: "You sit by the water. You stop looking for it. The creek keeps going.",
+    effects: &[Effect::GainIdea(Route::StoppedLooking)],
+    ..ACTION
+};
+
+/// Walking the County Park trail.
+const WALK: Action = Action {
+    verbs: &["walk", "hike", "follow"],
+    response: "You walk until you stop thinking about it. The trail loops back to \
+        where it started, and so do you, sort of.",
+    effects: &[Effect::GainIdea(Route::StoppedLooking)],
+    ..ACTION
+};
+
+/// Helping the farmer in Amish Country.
+const HELP_FARMER: Action = Action {
+    verbs: &["help"],
+    noun: "farmer",
+    response: "You hold the fence post while the farmer works. He talks about doing \
+        one thing at a time, all the way through, and doesn't check his phone once. \
+        He doesn't have one.",
+    effects: &[Effect::GainIdea(Route::SlowedDown)],
+    ..ACTION
+};
+
+/// The roadside stand's honor-system pie.
+const BUY_PIE: Action = Action {
+    verbs: &["buy", "take", "get"],
+    noun: "pie",
+    response: "You leave cash in the tin and take a whoopie pie. Nobody checks.",
+    effects: &[Effect::Gain("whoopie_pie")],
     ..ACTION
 };
 
@@ -228,13 +257,25 @@ pub static ROOMS: &[Room] = &[
             Action {
                 verbs: &["open", "check"],
                 noun: "mailbox",
-                response: "Opening the small mailbox reveals a letter.",
+                forbids: &[LETTER],
+                response: "Opening the small mailbox reveals a letter. You take it.",
+                effects: &[Effect::Gain(LETTER)],
                 ..ACTION
             },
             Action {
-                verbs: &["read"],
-                noun: "mailbox",
-                ..READ_LETTER
+                verbs: &["take", "get"],
+                noun: "letter",
+                forbids: &[LETTER],
+                response: "You take the letter out of the mailbox.",
+                effects: &[Effect::Gain(LETTER)],
+                ..ACTION
+            },
+            Action {
+                verbs: &["read", "open"],
+                noun: "letter",
+                forbids: &[LETTER],
+                response: "The letter is still in the mailbox.",
+                ..ACTION
             },
             READ_LETTER,
         ],
@@ -242,25 +283,29 @@ pub static ROOMS: &[Room] = &[
     },
     Room {
         id: "dream_north",
-        title: "North of the House",
+        title: "The North Side of the House",
         description: "A narrow path runs along the north side of the house, toward \
             a wall of trees. You have the feeling you've been here before.",
         exits: &[("west", "dream_field"), ("east", "dream_east")],
+        actions: &[READ_LETTER],
         ..ROOM
     },
     Room {
         id: "dream_east",
-        title: "Behind the House",
+        title: "The Back of the House",
         description: "Behind the house, a window stands slightly ajar. The house \
             looks smaller from back here, or you are larger.",
         exits: &[("north", "dream_north"), ("south", "dream_south")],
-        actions: &[Action {
-            verbs: &["open", "climb", "enter"],
-            noun: "window",
-            response: "You ease the window open and climb through, landing solidly in grass.",
-            effects: &[Effect::Teleport("dream_field")],
-            ..ACTION
-        }],
+        actions: &[
+            Action {
+                verbs: &["open", "climb", "enter"],
+                noun: "window",
+                response: "You ease the window open and climb through, landing solidly in grass.",
+                effects: &[Effect::Teleport("dream_field")],
+                ..ACTION
+            },
+            READ_LETTER,
+        ],
         ..ROOM
     },
     Room {
@@ -269,6 +314,7 @@ pub static ROOMS: &[Room] = &[
         description: "A porch that was not there a moment ago. The swing is still \
             moving. Nobody is on it.",
         exits: &[("west", "dream_field"), ("east", "dream_east")],
+        actions: &[READ_LETTER],
         ..ROOM
     },
     // ── Act II: the city ─────────────────────────────────────────────
@@ -276,19 +322,12 @@ pub static ROOMS: &[Room] = &[
         id: "bedroom",
         title: "Your Bedroom",
         description: "It's dark, and your alarm is going off. Twenty browser tabs glare \
-            at you on the glowing screen of your laptop. One of them, is a signup sheet \
-            for the TechLancaster Lightning Talk Event.\n\n And it has your name on it!",
+            at you on the glowing screen of your laptop. One of them is a signup sheet \
+            for the TechLancaster Lightning Talk Event.\n\nAnd it has your name on it!",
         first_visit: Some(
-            "You had all the time in the world to come up with an idea.\n\nNow you have a day.",
+            "You had all the time in the world to come up with an idea. Now you only have a day.",
         ),
-        phase_text: &[
-            (Phase::Morning, "Grey light leaks in around the blinds."),
-            (
-                Phase::Evening,
-                "The room has gone quiet. Everyone who matters to tonight is \
-                already out there.",
-            ),
-        ],
+        phase_text: &[],
         exits: &[("out", "kitchen"), ("kitchen", "kitchen")],
         ..ROOM
     },
@@ -305,24 +344,28 @@ pub static ROOMS: &[Room] = &[
             ),
         ],
         exits: &[
-            ("out", "stoop"),
+            ("out", "square"),
             ("back", "bedroom"),
             ("bedroom", "bedroom"),
-            ("stoop", "stoop"),
-            ("outside", "stoop"),
+            ("square", "square"),
+            ("outside", "square"),
         ],
         items: &["coffee"],
         ..ROOM
     },
     Room {
-        id: "stoop",
-        title: "The Stoop",
-        description: "The cold gets in immediately. The grid lays itself out ahead: \
-            King, Queen, Prince, Duke. Brick sidewalks lose their slow fight with \
-            the tree roots.",
+        id: "square",
+        title: "The Square",
+        description: "Center city Lancaster. Red brick buildings stand shoulder to \
+            shoulder, and the air smells like fall. An old Amish man hums past on an \
+            electric scooter. Coffee is west at Mean Cup, work is north, County Park \
+            is south, and Amish Country is out east.",
         phase_text: &[
-            (Phase::Morning, "Delivery trucks idle along Duke."),
-            (Phase::Midday, "Office people are out hunting lunch."),
+            (
+                Phase::Morning,
+                "Shop owners are sweeping their front steps.",
+            ),
+            (Phase::Midday, "The lunch crowd moves through in waves."),
             (
                 Phase::Afternoon,
                 "The light goes long and gold across the brick.",
@@ -333,75 +376,39 @@ pub static ROOMS: &[Room] = &[
             ),
         ],
         exits: &[
-            ("north", "market"),
-            ("east", "mean_cup"),
-            ("south", "office"),
-            ("west", "square"),
+            ("west", "mean_cup"),
+            ("north", "office"),
+            ("south", "county_park"),
+            ("east", "amish_country"),
             ("in", "kitchen"),
-            ("market", "market"),
-            ("central market", "market"),
             ("mean cup", "mean_cup"),
+            ("coffee", "mean_cup"),
             ("cafe", "mean_cup"),
             ("office", "office"),
             ("work", "office"),
-            ("square", "square"),
-            ("penn square", "square"),
+            ("park", "county_park"),
+            ("county park", "county_park"),
+            ("amish country", "amish_country"),
+            ("country", "amish_country"),
+            ("farm", "amish_country"),
             ("kitchen", "kitchen"),
             ("home", "kitchen"),
         ],
-        ..ROOM
-    },
-    Room {
-        id: "market",
-        title: "Central Market",
-        description: "Central Market is loud and crowded, every aisle its own \
-            conversation. Somewhere close, cider donuts.",
-        phase_text: &[
-            (
-                Phase::Morning,
-                "The stands are still setting up and the good stuff is going fast.",
-            ),
-            (Phase::Midday, "Lunch lines braid through the aisles."),
-            (
-                Phase::Afternoon,
-                "Vendors are packing up. The donuts are gone.",
-            ),
-            (
-                Phase::Evening,
-                "The market is closed. You're here anyway, looking through the glass.",
-            ),
-        ],
-        exits: &[("out", "stoop"), ("south", "stoop"), ("stoop", "stoop")],
-        actions: &[
-            Action {
-                verbs: &["listen", "eavesdrop"],
-                response: "You stop trying to think and just listen. Two strangers \
-                    argue about something small with enormous care. Something in it \
-                    catches. You have the idea now.",
-                effects: &[Effect::GainIdea(Route::Overheard)],
-                ..ACTION
-            },
-            MARKET_BUY,
-            Action {
-                noun: "donut",
-                ..MARKET_BUY
-            },
-            Action {
-                noun: "donuts",
-                ..MARKET_BUY
-            },
-            Action {
-                noun: "something",
-                ..MARKET_BUY
-            },
-        ],
+        actions: &[Action {
+            verbs: &["take", "get", "buy"],
+            noun: "coffee",
+            response: "You head west for coffee.",
+            effects: &[Effect::Teleport("mean_cup")],
+            ..ACTION
+        }],
         ..ROOM
     },
     Room {
         id: "mean_cup",
         title: "Mean Cup",
-        description: "Someone at the next table is pitching something with a lot of \
-            hand gestures. Someone else has a keyboard you could hear from the door.",
+        description: "Warm and loud. At the next table, two strangers are arguing \
+            about something small with enormous care, and it's hard not to \
+            eavesdrop. The barista will happily refill your coffee.",
         phase_text: &[
             (Phase::Morning, "The line is out to the door."),
             (
@@ -409,17 +416,15 @@ pub static ROOMS: &[Room] = &[
                 "Laptop campers have claimed every outlet.",
             ),
         ],
-        exits: &[("out", "stoop"), ("west", "stoop"), ("stoop", "stoop")],
+        exits: &[("east", "square"), ("out", "square"), ("square", "square")],
         actions: &[
+            EAVESDROP,
             Action {
-                verbs: &["eavesdrop", "listen"],
-                response: "You don't mean to listen. You listen. You leave with a \
-                    strong opinion about semicolons, and it isn't even yours.",
-                effects: &[Effect::Gain("opinion")],
-                ..ACTION
+                noun: "strangers",
+                ..EAVESDROP
             },
             Action {
-                verbs: &["refill", "buy", "order"],
+                verbs: &["refill", "buy", "order", "get"],
                 noun: "coffee",
                 response: "The barista tops you off without asking. Nothing changes. \
                     You feel better anyway.",
@@ -431,13 +436,10 @@ pub static ROOMS: &[Room] = &[
     Room {
         id: "office",
         title: "The Office",
-        description: "Standup is in five minutes; it's always in five minutes. Jira \
-            is open on someone's monitor. A rubber duck on your desk waits patiently.",
+        description: "Standup is about to start. You could say \"no blockers\" like \
+            always, or finally describe the blocker that's been eating your week. \
+            A rubber duck on your desk looks ready to talk it through.",
         phase_text: &[
-            (
-                Phase::Morning,
-                "Everyone is pretending to have read the ticket.",
-            ),
             (
                 Phase::Midday,
                 "Half the floor is at lunch. The other half is in a meeting about it.",
@@ -447,123 +449,93 @@ pub static ROOMS: &[Room] = &[
                 "The afternoon slump has set in. Only the duck is alert.",
             ),
         ],
-        exits: &[
-            ("out", "stoop"),
-            ("north", "stoop"),
-            ("down", "garage"),
-            ("stoop", "stoop"),
-            ("garage", "garage"),
-        ],
+        exits: &[("south", "square"), ("out", "square"), ("square", "square")],
         actions: &[
             Action {
-                verbs: &["say"],
+                verbs: &["say", "standup"],
                 noun: "no blockers",
                 response: "\"No blockers.\" Everyone nods. You survive. Nothing is gained.",
                 ..ACTION
             },
             Action {
-                verbs: &["describe", "admit", "mention"],
+                verbs: &["describe", "admit", "mention", "explain"],
                 noun: "blocker",
                 response: "You tell them what actually went wrong. It stings a little, \
-                    saying it out loud. Someone says \"oh no, we had that too.\" You now \
-                    have a war story, and the idea came with it.",
+                    saying it out loud. Someone says \"oh no, we had that too.\" Now \
+                    you have a war story.",
                 effects: &[Effect::Gain("war_story"), Effect::GainIdea(Route::WarStory)],
                 ..ACTION
             },
             Action {
                 verbs: &["talk", "speak", "explain"],
                 noun: "duck",
-                response: "You explain everything to the duck. The duck says nothing, \
-                    supportively. You feel a little more put together.",
+                response: "You explain the whole problem to the duck. The duck says \
+                    nothing, supportively. Halfway through, you hear yourself.",
+                effects: &[Effect::GainIdea(Route::ExplainedIt)],
                 ..ACTION
             },
         ],
         ..ROOM
     },
     Room {
-        id: "garage",
-        title: "Parking Garage, Level 4",
-        description: "Concrete, echo, one flickering light. Your car has a ticket on it.",
-        exits: &[("up", "office"), ("out", "stoop"), ("office", "office")],
-        actions: &[Action {
-            verbs: &["read", "take", "get"],
-            noun: "ticket",
-            response: "You read the ticket. You read it again. You are filled with \
-                righteous indignation, which, to be clear, is a completely valid \
-                talk topic.",
-            effects: &[Effect::Gain("indignation")],
-            ..ACTION
-        }],
-        ..ROOM
-    },
-    Room {
-        id: "square",
-        title: "Penn Square",
-        description: "The Soldiers and Sailors Monument, a busker working through a \
-            song everyone knows the chorus to, and pigeons who clearly have a plan.",
+        id: "county_park",
+        title: "County Park",
+        description: "Leaves are turning along the Conestoga, and a bench by the water \
+            looks like it has been waiting for you. A trail wanders off into the \
+            trees, going nowhere in particular.",
         phase_text: &[
+            (Phase::Morning, "Mist is still lifting off the creek."),
             (
-                Phase::Midday,
-                "The lunch crowd is eating on the monument steps.",
+                Phase::Evening,
+                "The light is going, and so are the dog walkers.",
             ),
-            (Phase::Evening, "The square is emptying toward dinner."),
         ],
-        exits: &[
-            ("east", "stoop"),
-            ("north", "park"),
-            ("up", "monument"),
-            ("stoop", "stoop"),
-            ("park", "park"),
-            ("musser park", "park"),
-            ("monument", "monument"),
-            ("steps", "monument"),
-        ],
+        exits: &[("north", "square"), ("out", "square"), ("square", "square")],
         actions: &[
-            BUSKER,
+            SIT,
             Action {
-                noun: "busker",
-                ..BUSKER
+                noun: "bench",
+                ..SIT
+            },
+            Action {
+                noun: "down",
+                ..SIT
+            },
+            WALK,
+            Action {
+                noun: "trail",
+                ..WALK
             },
         ],
         ..ROOM
     },
     Room {
-        id: "monument",
-        title: "Top of the Monument Steps",
-        description: "Not high, exactly, but high enough. The whole grid runs out \
-            from here in four directions.",
-        exits: &[("down", "square"), ("square", "square")],
-        actions: &[Action {
-            verbs: &["look"],
-            response: "From up here, everything you were worried about is roughly the \
-                size of a pigeon. You have a moment of perspective. The idea was in \
-                there too.",
-            effects: &[
-                Effect::Gain("perspective"),
-                Effect::GainIdea(Route::Perspective),
-            ],
-            ..ACTION
-        }],
-        ..ROOM
-    },
-    Room {
-        id: "park",
-        title: "Musser Park",
-        description: "Quiet, a little overgrown, with a bench whose plaque remembers \
-            someone who liked it here.",
-        exits: &[
-            ("south", "square"),
-            ("out", "stoop"),
-            ("square", "square"),
-            ("stoop", "stoop"),
+        id: "amish_country",
+        title: "Amish Country",
+        description: "The city gives way to farmland. A buggy clops past. A roadside \
+            stand sells pies on the honor system, and a farmer mending a fence nods \
+            like you could stop and help.",
+        phase_text: &[
+            (Phase::Midday, "Somewhere, a dinner bell rings."),
+            (Phase::Evening, "The fields go gold, then grey."),
         ],
-        on_enter: Some(Action {
-            forbids: &[IDEA],
-            response: "You sit on the bench. You stop looking for it. That's when the \
-                idea shows up, the way a cat does.",
-            effects: &[Effect::GainIdea(Route::StoppedLooking)],
-            ..ACTION
-        }),
+        exits: &[("west", "square"), ("out", "square"), ("square", "square")],
+        actions: &[
+            HELP_FARMER,
+            Action {
+                noun: "",
+                ..HELP_FARMER
+            },
+            Action {
+                verbs: &["talk"],
+                ..HELP_FARMER
+            },
+            BUY_PIE,
+            Action {
+                noun: "whoopie pie",
+                ..BUY_PIE
+            },
+        ],
         ..ROOM
     },
     Room {
@@ -602,11 +574,6 @@ mod tests {
     use crate::clock::Phase;
     use crate::text::{wrap, WIDTH};
     use std::collections::HashSet;
-
-    /// Every action in a room, including its arrival action.
-    fn actions(r: &Room) -> impl Iterator<Item = &Action> {
-        r.actions.iter().chain(r.on_enter.as_ref())
-    }
 
     #[test]
     fn room_and_item_ids_are_unique() {
@@ -657,7 +624,7 @@ mod tests {
             for id in r.items {
                 assert!(item(id).is_some(), "{}: missing item {id:?}", r.id);
             }
-            for a in actions(r) {
+            for a in r.actions {
                 for id in a.requires.iter().chain(a.forbids) {
                     assert!(
                         item(id).is_some(),
@@ -696,10 +663,14 @@ mod tests {
         let mut queue: Vec<&str> = seen.iter().copied().collect();
         while let Some(id) = queue.pop() {
             let Some(r) = room(id) else { continue };
-            let teleports = actions(r).flat_map(|a| a.effects).filter_map(|e| match e {
-                Effect::Teleport(to) => Some(*to),
-                _ => None,
-            });
+            let teleports = r
+                .actions
+                .iter()
+                .flat_map(|a| a.effects)
+                .filter_map(|e| match e {
+                    Effect::Teleport(to) => Some(*to),
+                    _ => None,
+                });
             for to in r.exits.iter().map(|(_, to)| *to).chain(teleports) {
                 if seen.insert(to) {
                     queue.push(to);
@@ -712,13 +683,28 @@ mod tests {
     }
 
     #[test]
-    fn city_rooms_return_to_the_stoop() {
-        for id in ["market", "mean_cup", "office", "garage", "park"] {
+    fn spokes_return_to_the_square_and_offer_the_idea() {
+        for id in [
+            "kitchen",
+            "mean_cup",
+            "office",
+            "county_park",
+            "amish_country",
+        ] {
             let r = room(id).expect("room exists");
             assert!(
-                r.exits.iter().any(|(_, to)| *to == "stoop"),
-                "{id} has no way back to the stoop"
+                r.exits.iter().any(|(_, to)| *to == "square"),
+                "{id} has no way back to the square"
             );
+        }
+        for id in ["mean_cup", "office", "county_park", "amish_country"] {
+            let r = room(id).expect("room exists");
+            let offers_idea = r
+                .actions
+                .iter()
+                .flat_map(|a| a.effects)
+                .any(|e| matches!(e, Effect::GainIdea(_)));
+            assert!(offers_idea, "{id} has no way to get the idea");
         }
     }
 
