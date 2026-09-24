@@ -5,7 +5,7 @@
 //! current room (exit nicknames, room actions, easter eggs, catch-all).
 
 /// Words dropped anywhere in the input before matching.
-const FILLER: &[&str] = &["the", "a", "an", "please", "go"];
+const FILLER: &[&str] = &["the", "a", "an", "please", "go", "to", "at"];
 
 /// Accepted direction words and the canonical direction each maps to.
 const DIRECTIONS: &[(&str, &str)] = &[
@@ -61,7 +61,7 @@ pub fn direction(word: &str) -> Option<&'static str> {
 
 /// Parse a raw input line.
 ///
-/// Directions are checked first, then global verbs; see SPEC §4.
+/// Directions are checked first, then global verbs.
 pub fn parse(input: &str) -> Command {
     let words = normalize(input);
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
@@ -90,6 +90,10 @@ mod tests {
         assert_eq!(parse("N"), Command::Go("north"));
         assert_eq!(parse("  go   north "), Command::Go("north"));
         assert_eq!(parse("please go out"), Command::Go("out"));
+        assert_eq!(
+            parse("go to the market"),
+            Command::Other("market".to_string())
+        );
     }
 
     #[test]
