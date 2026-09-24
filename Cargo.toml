@@ -2,5 +2,11 @@
 name = "tl-zork"
 version = "0.1.0"
 edition = "2024"
+description = "A Zork-style text adventure played live as a 5-minute lightning talk at TechLancaster"
+license = "MIT"
+repository = "https://github.com/zachfedor/tl-zork"
+keywords = ["game", "text-adventure", "zork", "interactive-fiction"]
+categories = ["games"]
+exclude = [".project", "CLAUDE.md"]
 
 [dependencies]
