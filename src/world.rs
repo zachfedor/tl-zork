@@ -15,6 +15,47 @@ pub struct Room {
     pub exits: &'static [(&'static str, &'static str)],
     /// Item ids present when the game starts.
     pub items: &'static [&'static str],
+    /// Room-specific commands, tried in order.
+    pub actions: &'static [Action],
+}
+
+/// A room-specific command and what it does.
+pub struct Action {
+    /// Any of these verbs triggers the action: ["drink", "sip", "chug"].
+    pub verbs: &'static [&'static str],
+    /// Must follow the verb; "" means the verb alone.
+    pub noun: &'static str,
+    /// Item ids that must all be held.
+    pub requires: &'static [&'static str],
+    /// Item ids none of which may be held.
+    pub forbids: &'static [&'static str],
+    pub response: &'static str,
+    /// Applied in order; may be empty.
+    pub effects: &'static [Effect],
+}
+
+/// A change an action makes to the game.
+pub enum Effect {
+    /// Run the ending (SPEC §8).
+    Win,
+}
+
+impl Action {
+    /// True if `words` is one of the verbs, followed by the noun if there is one.
+    ///
+    /// `words` is already normalized, so filler like "the" is gone.
+    pub fn matches(&self, words: &str) -> bool {
+        self.verbs.iter().any(|verb| {
+            if self.noun.is_empty() {
+                words == *verb
+            } else {
+                words
+                    .strip_prefix(verb)
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    == Some(self.noun)
+            }
+        })
+    }
 }
 
 /// Something the player can carry.
@@ -36,8 +77,9 @@ pub const VENUE: &str = "venue";
 
 /// Printed last, after the ending. The talk doubles as an advertisement.
 pub const EVENT_DETAILS: &str = "TECH LANCASTER\n\
-    [DATE] at Tellus360, 24 E King St\n\
-    Give a talk: [SIGNUP LINK]";
+    Thursday, October 22, 2026, at West Art\n\
+    816 Buchanan Ave, Lancaster, PA 17603\n\
+    Give a talk: https://bit.ly/tl-lightning-signup-2026";
 
 /// Confidence display states as (inventory, status line) text.
 ///
@@ -77,6 +119,7 @@ pub static ROOMS: &[Room] = &[
         ],
         exits: &[("out", "kitchen")],
         items: &[],
+        actions: &[],
     },
     Room {
         id: "kitchen",
@@ -93,6 +136,7 @@ pub static ROOMS: &[Room] = &[
         ],
         exits: &[("out", "stoop"), ("back", "apartment")],
         items: &["coffee"],
+        actions: &[],
     },
     Room {
         id: "stoop",
@@ -115,10 +159,11 @@ pub static ROOMS: &[Room] = &[
         ],
         exits: &[("in", "kitchen")],
         items: &[],
+        actions: &[],
     },
     Room {
         id: "venue",
-        title: "Tellus360",
+        title: "West Art",
         description: "Warm, loud, a dozen people who are also nervous. There's a \
             projector, a laptop cable, and a spot near the front with your name on it.",
         first_visit: None,
@@ -128,6 +173,14 @@ pub static ROOMS: &[Room] = &[
         )],
         exits: &[],
         items: &[],
+        actions: &[Action {
+            verbs: &["give", "do", "start"],
+            noun: "talk",
+            requires: &[],
+            forbids: &[],
+            response: "You don't wait to be called. You walk to the front of the room.",
+            effects: &[Effect::Win],
+        }],
     },
 ];
 
@@ -180,6 +233,39 @@ mod tests {
                 assert!(item(id).is_some(), "{}: missing item {id:?}", r.id);
             }
         }
+    }
+
+    #[test]
+    fn every_action_is_well_formed() {
+        for r in ROOMS {
+            for a in r.actions {
+                assert!(!a.verbs.is_empty(), "{}: action with no verbs", r.id);
+                for id in a.requires.iter().chain(a.forbids) {
+                    assert!(
+                        item(id).is_some(),
+                        "{}: action needs missing item {id:?}",
+                        r.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn action_matches_verb_and_noun() {
+        let a = Action {
+            verbs: &["give", "do"],
+            noun: "talk",
+            requires: &[],
+            forbids: &[],
+            response: "",
+            effects: &[],
+        };
+        assert!(a.matches("give talk"));
+        assert!(a.matches("do talk"));
+        assert!(!a.matches("give"));
+        assert!(!a.matches("givetalk"));
+        assert!(!a.matches("give talk now"));
     }
 
     #[test]

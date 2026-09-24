@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::clock;
 use crate::parser::{self, Command};
 use crate::text::{self, WIDTH};
-use crate::world::{self, CONFIDENCE_STATES};
+use crate::world::{self, Action, CONFIDENCE_STATES, Effect};
 
 /// What the main loop should do after a command.
 #[derive(Debug)]
@@ -30,6 +30,8 @@ pub struct Game {
     /// Index into `CONFIDENCE_STATES`; saturates at the last entry.
     confidence: usize,
     visited: HashSet<&'static str>,
+    /// Set by `Effect::Win`; the step that sets it ends the game.
+    won: bool,
 }
 
 impl Default for Game {
@@ -51,6 +53,7 @@ impl Game {
             room_items,
             confidence: 0,
             visited: HashSet::new(),
+            won: false,
         }
     }
 
@@ -66,7 +69,7 @@ impl Game {
     /// command of any kind gets processed.
     pub fn step(&mut self, input: &str, elapsed: Duration) -> Outcome {
         if clock::is_over(elapsed) {
-            return Outcome::Ended(text::wrap(&self.ending(), WIDTH));
+            return Outcome::Ended(text::wrap(&self.ending(true), WIDTH));
         }
         let body = match parser::parse(input) {
             Command::Go(dir) => self.go(dir, elapsed),
@@ -78,6 +81,10 @@ impl Game {
             Command::Nothing => "Time passes. It does that.".to_string(),
             Command::Other(words) => self.other(&words, elapsed),
         };
+        if self.won {
+            let text = format!("{body}\n\n{}", self.ending(false));
+            return Outcome::Ended(text::wrap(&text, WIDTH));
+        }
         Outcome::Continue(format!(
             "{}\n\n{}",
             text::wrap(&body, WIDTH),
@@ -128,8 +135,8 @@ impl Game {
             }
             let arrival = self.enter(world::VENUE, elapsed);
             return format!(
-                "You set off. Somehow you're on Water Street. The lights are on at \
-                Tellus360 and you can hear the room from here.\n\n{arrival}"
+                "You set off. Somehow you're on Buchanan Avenue. The lights are on \
+                at West Art and you can hear the room from here.\n\n{arrival}"
             );
         }
         let dest = world::room(self.here)
@@ -143,15 +150,45 @@ impl Game {
 
     /// Resolve words the parser couldn't classify.
     ///
-    /// Only exit nicknames for now; room actions, easter eggs, and the
-    /// rotating catch-all land here in later slices.
+    /// Exit nicknames first, then the current room's actions. Easter eggs
+    /// and the rotating catch-all land here in later slices.
     fn other(&mut self, words: &str, elapsed: Duration) -> String {
         let is_exit =
             world::room(self.here).is_some_and(|r| r.exits.iter().any(|(d, _)| *d == words));
         if is_exit {
             return self.go(words, elapsed);
         }
+        if let Some(action) = self.find_action(words) {
+            return self.perform(action);
+        }
         "I don't understand that.".to_string()
+    }
+
+    /// The first action in this room that matches `words` and is allowed.
+    ///
+    /// A disallowed action is skipped rather than refused, so the input
+    /// falls through to later layers like any other unmatched command.
+    fn find_action(&self, words: &str) -> Option<&'static Action> {
+        world::room(self.here)?
+            .actions
+            .iter()
+            .find(|a| a.matches(words) && self.allows(a))
+    }
+
+    /// True if every required item is held and no forbidden item is.
+    fn allows(&self, action: &Action) -> bool {
+        action.requires.iter().all(|id| self.inventory.contains(id))
+            && !action.forbids.iter().any(|id| self.inventory.contains(id))
+    }
+
+    /// Apply an action's effects in order and return its response.
+    fn perform(&mut self, action: &Action) -> String {
+        for effect in action.effects {
+            match effect {
+                Effect::Win => self.won = true,
+            }
+        }
+        action.response.to_string()
     }
 
     /// Item ids in the current room.
@@ -244,12 +281,20 @@ impl Game {
     }
 
     /// The closing text: fixed opening, keyed lines, fixed close, event details.
-    fn ending(&self) -> String {
+    ///
+    /// `called` is true when time ran out, so the room calls the player up;
+    /// false when the player gave the talk themselves.
+    fn ending(&self, called: bool) -> String {
         // Keyed lines (idea route, confidence, visits, slides) come in a later slice
         let keyed = "Someone laughs at the part you weren't sure about. Someone \
             asks a question in the hallway afterward.";
+        let opening = if called {
+            "Someone calls your name.\n\n"
+        } else {
+            ""
+        };
         format!(
-            "Someone calls your name.\n\n\
+            "{opening}\
             You plug in. The room quiets. You have five minutes.\n\n\
             {keyed}\n\n\
             You had something. You always did.\n\n\
@@ -358,8 +403,8 @@ mod tests {
         let mut g = on_stoop();
         let out = cont(g.step("n", secs(240)));
         assert_eq!(g.here, world::VENUE);
-        assert!(said(&out, "Water Street"));
-        assert!(said(&out, "Tellus360"));
+        assert!(said(&out, "Buchanan Avenue"));
+        assert!(said(&out, "West Art"));
 
         let again = cont(g.step("s", secs(241)));
         assert!(said(&again, "already where you need to be"));
@@ -404,6 +449,66 @@ mod tests {
             out.trim_end()
                 .ends_with(world::EVENT_DETAILS.lines().last().unwrap_or(""))
         );
+    }
+
+    #[test]
+    fn timeout_ending_calls_the_player_up() {
+        let mut g = Game::new();
+        let Outcome::Ended(out) = g.step("look", secs(285)) else {
+            panic!("expected ending");
+        };
+        assert!(said(&out, "Someone calls your name."));
+        assert!(said(&out, "October 22, 2026"));
+        assert!(said(&out, "816 Buchanan Ave"));
+    }
+
+    #[test]
+    fn give_talk_at_venue_wins_without_being_called() {
+        for input in ["give talk", "give a talk", "do the talk", "start talk"] {
+            let mut g = on_stoop();
+            cont(g.step("n", secs(250)));
+            let Outcome::Ended(out) = g.step(input, secs(260)) else {
+                panic!("expected ending for {input:?}");
+            };
+            assert!(said(&out, "You don't wait to be called."), "{input:?}");
+            assert!(!said(&out, "Someone calls your name."), "{input:?}");
+            assert!(
+                said(&out, "You had something. You always did."),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn give_talk_elsewhere_does_not_end_the_game() {
+        let mut g = on_stoop();
+        assert!(matches!(
+            g.step("give talk", secs(10)),
+            Outcome::Continue(_)
+        ));
+    }
+
+    #[test]
+    fn allows_checks_requires_and_forbids() {
+        const NEEDS_COFFEE: Action = Action {
+            verbs: &["sip"],
+            noun: "",
+            requires: &["coffee"],
+            forbids: &[],
+            response: "",
+            effects: &[],
+        };
+        const NO_COFFEE: Action = Action {
+            requires: &[],
+            forbids: &["coffee"],
+            ..NEEDS_COFFEE
+        };
+        let mut g = Game::new();
+        assert!(!g.allows(&NEEDS_COFFEE));
+        assert!(g.allows(&NO_COFFEE));
+        g.inventory.push("coffee");
+        assert!(g.allows(&NEEDS_COFFEE));
+        assert!(!g.allows(&NO_COFFEE));
     }
 
     #[test]
